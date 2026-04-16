@@ -1,0 +1,23 @@
+#!/bin/sh
+set -e
+
+# ---------------------------------------------------------------------------
+# /hooks/post-restore
+#
+# Called by ONCE after restoring a backup into /storage, before the app boots.
+# If a backup snapshot file exists (created by pre-backup), promote it to be
+# the primary database file so vaultwarden starts from a clean state.
+# Also clean up any stale WAL/SHM files that wouldn't match the restored DB.
+# ---------------------------------------------------------------------------
+
+DB="/storage/db.sqlite3"
+BACKUP="/storage/db.sqlite3.backup"
+
+if [ -f "$BACKUP" ]; then
+    mv -f "$BACKUP" "$DB"
+fi
+
+# Remove WAL/SHM — they belong to the old DB state and would cause issues
+rm -f /storage/db.sqlite3-wal /storage/db.sqlite3-shm
+
+exit 0

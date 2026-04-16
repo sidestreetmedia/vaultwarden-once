@@ -1,0 +1,27 @@
+#!/bin/sh
+set -e
+
+# ---------------------------------------------------------------------------
+# /hooks/pre-backup
+#
+# Called by ONCE before it copies the /storage volume into a backup archive.
+# Vaultwarden uses SQLite — copying a live .db file can produce a corrupt
+# backup if a write is in progress. This hook uses SQLite's VACUUM INTO to
+# create a consistent point-in-time snapshot that ONCE can safely copy.
+# ---------------------------------------------------------------------------
+
+DB="/storage/db.sqlite3"
+BACKUP="/storage/db.sqlite3.backup"
+
+if [ -f "$DB" ]; then
+    sqlite3 "$DB" "VACUUM INTO '$BACKUP';"
+fi
+
+# Do the same for any secondary databases vaultwarden may use
+for EXTRA_DB in /storage/db.sqlite3-shm /storage/db.sqlite3-wal; do
+    # WAL/SHM are transient; the VACUUM INTO snapshot is self-contained,
+    # so we don't need to copy these separately.
+    true
+done
+
+exit 0

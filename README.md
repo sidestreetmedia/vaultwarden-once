@@ -1,47 +1,101 @@
 # Vaultwarden for ONCE
 
-A [Vaultwarden](https://github.com/dani-garcia/vaultwarden) Docker image packaged for [Basecamp's ONCE](https://github.com/basecamp/once) self-hosting platform.
+A [Vaultwarden](https://github.com/dani-garcia/vaultwarden) Docker image packaged for [Basecamp's ONCE](https://github.com/basecamp/once) self-hosting platform. Run your own Bitwarden-compatible password vault alongside Campfire, Writebook, Fizzy, or any other ONCE-managed app — managed from a single dashboard with automatic SSL, backups, and updates.
 
-## What this does
+## Why this exists
 
-ONCE expects any compatible application to:
+ONCE makes self-hosting Docker apps dead simple, but it expects apps to follow a specific contract. Vaultwarden doesn't do that out of the box. This image wraps the official `vaultwarden/server` image with the glue needed to make it a first-class ONCE citizen: an nginx reverse proxy for health checks, an entrypoint that translates ONCE's environment variables, and hook scripts for safe SQLite backups.
 
-1. **Serve HTTP on port 80** — Vaultwarden's Rocket server already does this.
-2. **Store persistent data in `/storage`** — The entrypoint symlinks `/data → /storage` so Vaultwarden reads and writes to the ONCE-managed volume.
-3. **Be a Docker container** — This wraps the official `vaultwarden/server` image.
+## How it works
 
-On top of the bare minimum, this image also integrates with ONCE's optional features:
+ONCE requires three things from any compatible application:
 
-- **Backup hooks** — `/hooks/pre-backup` uses `sqlite3 VACUUM INTO` to create a crash-consistent snapshot before ONCE copies the volume. `/hooks/post-restore` promotes that snapshot back to the primary DB after a restore.
-- **Environment variable mapping** — ONCE's `SMTP_*`, `DISABLE_SSL`, and `MAILER_FROM_ADDRESS` variables are translated to their Vaultwarden equivalents at startup.
+- **Serve HTTP on port 80.** ONCE's built-in kamal-proxy handles SSL termination and routes traffic to each app container on port 80. It also health-checks each app by sending `GET /up` and expecting a `200` response.
+- **Store persistent data in `/storage`.** ONCE mounts a volume here that persists across restarts and gets included in backups.
+- **Be a Docker container.** ONCE pulls, runs, and manages the container lifecycle.
 
-## Building
+Vaultwarden's Rocket web server doesn't serve a `/up` health endpoint, and its base Docker image declares `/data` as a volume mount point (which can't be symlinked or replaced at runtime). This image solves both problems.
+
+### Architecture
+
+```
+                    ┌─────────────────────────────────┐
+                    │         Docker Container         │
+                    │                                  │
+  ONCE kamal-proxy  │   ┌─────────┐    ┌────────────┐ │
+  ──── port 80 ────►│   │  nginx  │───►│ vaultwarden │ │
+                    │   │  :80    │    │   :8080     │ │
+                    │   └─────────┘    └────────────┘ │
+                    │    /up → 200       DATA_FOLDER   │
+                    │    /* → proxy      = /storage    │
+                    └─────────────────────────────────┘
+```
+
+- **nginx** listens on port 80 inside the container. It returns `200 OK` on `/up` for the kamal-proxy health check and reverse-proxies everything else to Vaultwarden on `127.0.0.1:8080`, including WebSocket upgrades for live sync.
+- **Vaultwarden** runs on port 8080 bound to localhost. The `DATA_FOLDER` environment variable points it at `/storage` so all persistent data lands in the ONCE-managed volume.
+- **entrypoint.sh** translates ONCE's environment variables (SMTP settings, SSL mode) into their Vaultwarden equivalents, starts nginx, then execs into the Vaultwarden binary.
+
+### Backup integration
+
+Vaultwarden uses SQLite. Copying a live `.db` file while writes are in progress can produce a corrupt backup. ONCE supports optional hook scripts to handle this:
+
+- `/hooks/pre-backup` runs `sqlite3 VACUUM INTO` to create a crash-consistent snapshot (`db.sqlite3.backup`) before ONCE copies the `/storage` volume. If the hook succeeds, ONCE copies files without pausing the container, so there's zero downtime during backups.
+- `/hooks/post-restore` promotes the snapshot back to the primary database after a restore, and cleans up stale WAL/SHM files that would belong to the old database state.
+
+## Installing with ONCE
+
+### Prerequisites
+
+- A server running ONCE (see [ONCE install instructions](https://github.com/basecamp/once))
+- A DNS A record pointing your chosen hostname to the server's IP address
+
+### Steps
+
+1. Launch ONCE on your server and choose to install a new application.
+2. When prompted for an image path, enter:
+
+```
+ghcr.io/sidestreetmedia/vaultwarden-once:main
+```
+
+3. Enter the hostname you've configured in DNS (e.g. `vault.example.com`).
+4. ONCE pulls the image, mounts the `/storage` volume, configures SSL via Let's Encrypt, and boots the container.
+5. Open the hostname in a browser. You'll see the Vaultwarden setup screen where you can create your first account.
+
+### After install
+
+- **Email delivery.** In the ONCE dashboard, press `s` on the app to open settings. Configure your SMTP provider under Email Settings. ONCE passes these values through to Vaultwarden automatically.
+- **Backups.** Configure a backup location in ONCE settings. The pre-backup hook ensures SQLite snapshots are consistent without pausing the container.
+- **Admin panel.** To enable Vaultwarden's admin panel, you'll need to set the `ADMIN_TOKEN` environment variable. This can be done by forking the image and setting it in your Dockerfile, or by passing it through ONCE if your version supports custom env vars.
+- **Signups.** By default, Vaultwarden allows open registration. To restrict signups after creating your account, set `SIGNUPS_ALLOWED=false`.
+
+## Building from source
 
 ### Automated (GitHub Actions)
 
-Push this repo to `github.com/sidestreetmedia/vaultwarden-once` and the included workflow will automatically build multi-arch images (amd64 + arm64) and push them to `ghcr.io/sidestreetmedia/vaultwarden-once:latest`.
+Every push to `main` triggers the included GitHub Actions workflow, which builds the image and pushes it to GitHub Container Registry. No secrets to configure — the workflow uses the built-in `GITHUB_TOKEN` for GHCR authentication.
 
-No secrets to configure — the workflow uses the built-in `GITHUB_TOKEN` for GHCR auth.
+The default workflow tags the image as `:main`. If you want a `:latest` tag, update the tags section in `.github/workflows/docker-publish.yml` (or `build.yml`).
 
 ### Manual
 
 ```bash
+git clone https://github.com/sidestreetmedia/vaultwarden-once.git
+cd vaultwarden-once
 docker build -t vaultwarden-once .
 ```
 
-## Installing with ONCE
+### Forking
 
-When ONCE prompts you for an image path, enter the registry path where you pushed the built image. For example:
+To run your own fork with custom configuration:
 
-```
-ghcr.io/youruser/vaultwarden-once:latest
-```
-
-ONCE will handle the rest — pulling the image, mounting `/storage`, generating `SECRET_KEY_BASE`, and configuring SSL and email if you set those up in the ONCE UI.
+1. Fork this repo to your own GitHub org.
+2. The Actions workflow will build and push to your fork's GHCR namespace automatically.
+3. In ONCE, switch the image path to your fork's registry path in the app settings.
 
 ## Running standalone (without ONCE)
 
-You can also run this image directly with Docker for testing:
+For local testing or non-ONCE deployments:
 
 ```bash
 docker run -d \
@@ -50,34 +104,59 @@ docker run -d \
   -v vaultwarden-data:/storage \
   -e DISABLE_SSL=true \
   -e DOMAIN=http://localhost \
-  vaultwarden-once
+  ghcr.io/sidestreetmedia/vaultwarden-once:main
 ```
+
+Then open `http://localhost` in a browser.
 
 ## Environment variables
 
-| Variable | Source | Effect |
+ONCE passes several environment variables to application containers. The entrypoint maps these to Vaultwarden's configuration:
+
+| ONCE Variable | Vaultwarden Equivalent | Notes |
 |---|---|---|
-| `DISABLE_SSL` | ONCE | When `true`, `DOMAIN` defaults to `http://` instead of `https://` |
-| `SMTP_ADDRESS` | ONCE | Mapped to Vaultwarden's `SMTP_HOST` |
-| `SMTP_PORT` | ONCE | Passed through; also used to infer `SMTP_SECURITY` |
-| `SMTP_USERNAME` | ONCE | Passed through |
-| `SMTP_PASSWORD` | ONCE | Passed through |
-| `MAILER_FROM_ADDRESS` | ONCE | Mapped to Vaultwarden's `SMTP_FROM` |
-| `DOMAIN` | User/override | Full external URL (e.g. `https://vault.example.com`) |
+| `DISABLE_SSL` | `DOMAIN` scheme | When `true`, `DOMAIN` defaults to `http://`. Otherwise `https://`. |
+| `SMTP_ADDRESS` | `SMTP_HOST` | SMTP server hostname |
+| `SMTP_PORT` | `SMTP_PORT` | Also used to auto-detect `SMTP_SECURITY` (465→force_tls, 25→off, other→starttls) |
+| `SMTP_USERNAME` | `SMTP_USERNAME` | Passed through directly |
+| `SMTP_PASSWORD` | `SMTP_PASSWORD` | Passed through directly |
+| `MAILER_FROM_ADDRESS` | `SMTP_FROM` | Sender address for outbound email |
+| `SECRET_KEY_BASE` | — | Generated by ONCE. Not used by Vaultwarden but available if needed. |
+| `NUM_CPUS` | — | Available for tuning but not mapped by default. |
 
-Any other Vaultwarden environment variable (like `SIGNUPS_ALLOWED`, `ADMIN_TOKEN`, etc.) can still be passed through and will work as normal.
+Any native Vaultwarden environment variable (`ADMIN_TOKEN`, `SIGNUPS_ALLOWED`, `DOMAIN`, `LOG_LEVEL`, etc.) can be set alongside these and will work as expected. Explicitly set values always take precedence over the auto-mapped defaults.
 
-## File layout inside the container
+## File layout
 
 ```
-/storage/              ← ONCE-managed persistent volume
-  db.sqlite3           ← Vaultwarden SQLite database
-  db.sqlite3.backup    ← Pre-backup snapshot (temporary)
-  attachments/         ← File attachments
-  sends/               ← Bitwarden Send files
-  icon_cache/          ← Cached website icons
-/data → /storage       ← Symlink so vaultwarden finds its data
-/hooks/pre-backup      ← Safe SQLite snapshot before backup
-/hooks/post-restore    ← Promote snapshot after restore
-/entrypoint.sh         ← Env var mapping + launch
+/etc/nginx/nginx.conf      ← Reverse proxy config (port 80 → 8080, /up health check)
+/entrypoint.sh             ← ONCE env var mapping, starts nginx + vaultwarden
+/hooks/pre-backup          ← SQLite VACUUM INTO snapshot before ONCE backup
+/hooks/post-restore        ← Promote snapshot after ONCE restore
+/storage/                  ← ONCE-managed persistent volume
+  ├── db.sqlite3           ← Vaultwarden SQLite database
+  ├── db.sqlite3.backup    ← Temporary pre-backup snapshot
+  ├── rsa_key.pem          ← RSA private key (generated on first run)
+  ├── rsa_key.pub.pem      ← RSA public key
+  ├── attachments/         ← File attachments
+  ├── sends/               ← Bitwarden Send files
+  └── icon_cache/          ← Cached website favicons
 ```
+
+## Updating
+
+To pull in a newer upstream Vaultwarden release, push any commit to `main` (or trigger a manual workflow run from the Actions tab). The Dockerfile uses `vaultwarden/server:latest` as its base, so each build picks up the most recent stable release.
+
+ONCE checks for new image versions periodically and can apply updates from its dashboard. You can also force an update from the ONCE app settings.
+
+## Compatibility notes
+
+- **Base image.** `vaultwarden/server:latest` is Debian-based (trixie). The Dockerfile installs packages via `apt-get`.
+- **Volume mount.** The upstream vaultwarden image declares `/data` as a Docker `VOLUME`. This means `/data` cannot be removed, symlinked, or replaced at runtime. Instead of trying to redirect it, this image sets `DATA_FOLDER=/storage` to tell Vaultwarden to use the ONCE volume path directly.
+- **Health checks.** ONCE's kamal-proxy sends `GET /up` to each container and expects a `200` response. Vaultwarden doesn't serve this endpoint natively, so nginx handles it.
+- **WebSockets.** The nginx config includes WebSocket upgrade support for Vaultwarden's `/notifications/hub` endpoint, which is used for live sync across Bitwarden clients.
+- **SSL.** ONCE handles SSL termination via kamal-proxy and Let's Encrypt. Vaultwarden runs plain HTTP inside the container. The `DOMAIN` variable is set to `https://` so that generated URLs and redirects reference the correct scheme.
+
+## License
+
+This packaging is provided as-is. Vaultwarden is licensed under [AGPL-3.0](https://github.com/dani-garcia/vaultwarden/blob/main/LICENSE.txt). ONCE is licensed under [MIT](https://github.com/basecamp/once/blob/main/MIT-LICENSE).

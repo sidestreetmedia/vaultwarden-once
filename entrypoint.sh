@@ -24,7 +24,8 @@ if [ -n "$SMTP_ADDRESS" ]; then
     export SMTP_PASSWORD="${SMTP_PASSWORD:-}"
 fi
 
-export ROCKET_PORT="${ROCKET_PORT:-80}"
-export ROCKET_ADDRESS="${ROCKET_ADDRESS:-0.0.0.0}"
+export ROCKET_PORT="8080"
+export ROCKET_ADDRESS="127.0.0.1"
 
+nginx
 exec /vaultwarden

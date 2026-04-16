@@ -17,6 +17,14 @@ On top of the bare minimum, this image also integrates with ONCE's optional feat
 
 ## Building
 
+### Automated (GitHub Actions)
+
+Push this repo to `github.com/sidestreetmedia/vaultwarden-once` and the included workflow will automatically build multi-arch images (amd64 + arm64) and push them to `ghcr.io/sidestreetmedia/vaultwarden-once:latest`.
+
+No secrets to configure — the workflow uses the built-in `GITHUB_TOKEN` for GHCR auth.
+
+### Manual
+
 ```bash
 docker build -t vaultwarden-once .
 ```

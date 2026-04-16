@@ -2,20 +2,11 @@
 set -e
 
 # ---------------------------------------------------------------------------
-# ONCE mounts persistent storage at /storage. Vaultwarden expects /data.
-# Create /data as a symlink so vaultwarden reads/writes to the ONCE volume.
+# ONCE mounts persistent storage at /storage. The base vaultwarden image
+# declares /data as a VOLUME so it can't be removed or symlinked. Instead,
+# just point Vaultwarden at /storage directly via DATA_FOLDER.
 # ---------------------------------------------------------------------------
-if [ -d /storage ]; then
-    # If /data already exists as a real directory, move any seed content over
-    if [ -d /data ] && [ ! -L /data ]; then
-        cp -rn /data/* /storage/ 2>/dev/null || true
-        rm -rf /data
-    fi
-    ln -sfn /storage /data
-else
-    # Fallback: no ONCE volume, just use /data directly (standalone mode)
-    mkdir -p /data
-fi
+export DATA_FOLDER="/storage"
 
 # ---------------------------------------------------------------------------
 # Map ONCE environment variables to Vaultwarden equivalents
@@ -24,7 +15,6 @@ fi
 # DISABLE_SSL — tell vaultwarden whether the external URL uses HTTPS
 if [ "$DISABLE_SSL" = "true" ]; then
     export DOMAIN="${DOMAIN:-http://localhost}"
-    export ROCKET_TLS=""
 else
     # When ONCE handles SSL, vaultwarden still serves plain HTTP on port 80,
     # but outbound links/redirects should reference https.
@@ -49,14 +39,12 @@ if [ -n "$SMTP_ADDRESS" ]; then
     export SMTP_PASSWORD="${SMTP_PASSWORD:-}"
 fi
 
-# Vaultwarden listens on port 80 by default via ROCKET_PORT
-export ROCKET_PORT="${ROCKET_PORT:-80}"
-export ROCKET_ADDRESS="${ROCKET_ADDRESS:-0.0.0.0}"
-
-# Data folder (now points to /storage via symlink)
-export DATA_FOLDER="${DATA_FOLDER:-/data}"
+# Vaultwarden listens on 8080; nginx fronts it on port 80
+export ROCKET_PORT="8080"
+export ROCKET_ADDRESS="127.0.0.1"
 
 # ---------------------------------------------------------------------------
-# Launch vaultwarden
+# Launch nginx (port 80) then vaultwarden (port 8080)
 # ---------------------------------------------------------------------------
+nginx
 exec /vaultwarden
